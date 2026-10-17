@@ -1,0 +1,7 @@
+{
+  "post-install": {
+    "command": "bash",
+    "args": ["-c", "cd skills/yama-route-researcher/tools && uv sync"],
+    "description": "yama-route-researcher の Python 依存関係をインストール"
+  }
+}

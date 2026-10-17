@@ -1,0 +1,11 @@
+{
+  "name": "yama",
+  "version": "0.1.0",
+  "description": "日本の山のルート調査: 気象庁・国土地理院・ヤマレコ・YAMAP・山小屋の公式情報などをまとめ、天気・警報・火山・日照・アクセス・登山届を含む日本語のルート調査レポートを作る（claude-mountaineering-skills の日本版）",
+  "author": {
+    "name": "yudai"
+  },
+  "license": "MIT",
+  "keywords": ["登山", "mountaineering", "japan", "yamareco", "yamap", "jma", "gsi", "route-beta"],
+  "skills": ["./skills/yama-route-researcher"]
+}
