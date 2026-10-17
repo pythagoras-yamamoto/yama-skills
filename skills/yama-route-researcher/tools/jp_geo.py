@@ -9,6 +9,8 @@ find_peak.py と fetch_conditions.py の両方から使う。
 from __future__ import annotations
 
 import math
+import threading
+import time
 from typing import Any
 
 import httpx
@@ -23,6 +25,15 @@ GSI_REVERSE_GEOCODER_URL = "https://mreversegeocoder.gsi.go.jp/reverse-geocoder/
 GSI_ELEVATION_URL = "https://cyberjapandata2.gsi.go.jp/general/dem/scripts/getelevation.php"
 JMA_AREA_URL = "https://www.jma.go.jp/bosai/common/const/area.json"
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+# 本家が 502/504/429 を返すことが多いため、順にミラーを試す。
+OVERPASS_URLS = (
+    OVERPASS_URL,
+    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+)
+OVERPASS_RETRY_WAIT_S = 5.0
+_overpass_slots = threading.BoundedSemaphore(2)
 
 # 日本全体をおおまかに覆う bbox（south, west, north, east）
 JAPAN_BBOX = (20.0, 122.0, 46.0, 154.0)
@@ -176,6 +187,11 @@ def resolve_jma_area(muni_code: str) -> dict[str, Any]:
         return result
 
     c20 = class20s[code20]
+    # 松本市（松本／乗鞍上高地）のように市町村が気象庁の区域で分割されている場合、
+    # 山頂がどちらの区域か座標からは決められないので候補をすべて返す。
+    alternatives = [
+        {"code": k, "name": v.get("name")} for k, v in class20s.items() if k.startswith(muni_code)
+    ]
     code15 = c20.get("parent")
     code10 = (area.get("class15s", {}).get(code15) or {}).get("parent")
     office = (area.get("class10s", {}).get(code10) or {}).get("parent")
@@ -189,6 +205,12 @@ def resolve_jma_area(muni_code: str) -> dict[str, Any]:
             "office_name": (area.get("offices", {}).get(office) or {}).get("name"),
         }
     )
+    if len(alternatives) > 1:
+        result["class20_alternatives"] = alternatives
+        result["class20_note"] = (
+            "この市町村は気象庁の警報区域が分割されている。jma_warnings は全区域分を返すので、"
+            "山域に当たる区域（例: 松本市乗鞍上高地）の警報を確認すること。"
+        )
     return result
 
 
@@ -209,11 +231,24 @@ def locate(lat: float, lon: float) -> dict[str, Any]:
 # ---------------------------------------------------------------- OpenStreetMap
 
 
-def overpass(query: str, timeout: float = 60.0) -> list[dict[str, Any]]:
-    with client(timeout=timeout) as c:
-        resp = c.post(OVERPASS_URL, data={"data": query})
-        resp.raise_for_status()
-        return resp.json().get("elements", [])
+def overpass(query: str, timeout: float = 40.0) -> list[dict[str, Any]]:
+    """Overpass API に問い合わせる。サーバー障害・混雑時は次のミラーを試す。"""
+    errors: list[str] = []
+    # overpass-api.de は同時2接続まで。超えると 429 になるので並列呼び出しを絞る。
+    with _overpass_slots, client(timeout=timeout) as c:
+        for url in OVERPASS_URLS:
+            for attempt in range(2):
+                try:
+                    resp = c.post(url, data={"data": query})
+                    if resp.status_code == 429 and attempt == 0:
+                        time.sleep(OVERPASS_RETRY_WAIT_S)
+                        continue
+                    resp.raise_for_status()
+                    return resp.json().get("elements", [])
+                except (httpx.HTTPStatusError, httpx.TransportError, ValueError) as e:
+                    errors.append(f"{httpx.URL(url).host}: {str(e).splitlines()[0]}")
+                    break
+    raise RuntimeError("Overpass のすべてのサーバーが失敗: " + " / ".join(errors))
 
 
 def osm_coords(el: dict) -> tuple[float | None, float | None]:

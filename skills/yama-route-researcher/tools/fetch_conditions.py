@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import math
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -360,7 +361,10 @@ def parse_warnings(data: Any, class20: str, class10: str | None = None) -> list[
     return sorted(found.values(), key=lambda w: int(w["code"]) if w["code"].isdigit() else 999)
 
 
-def fetch_jma_warnings(office: str, class20: str | None, class10: str | None) -> dict[str, Any]:
+def fetch_jma_warnings(
+    office: str, class20: str | None, class10: str | None, alternatives: list[dict] | None = None
+) -> dict[str, Any]:
+    alternatives = alternatives or []
     page = _jma_warning_page(class20, office)
     if not class20:
         return {"error": "市町村コードが不明なため警報を照合できません", "page": page}
@@ -394,6 +398,13 @@ def fetch_jma_warnings(office: str, class20: str | None, class10: str | None) ->
     except Exception as e:  # noqa: BLE001
         return {"error": str(e), "page": page}
     result["active"] = parse_warnings(data, class20, class10)
+    # 分割された市町村（例: 松本市乗鞍上高地）は残りの区域も返す
+    others = [a for a in alternatives if a.get("code") != class20]
+    if others:
+        result["other_areas"] = [
+            {**a, "active": parse_warnings(data, a["code"]), "page": _jma_warning_page(a["code"], office)}
+            for a in others
+        ]
     result["note"] = "JSON は気象庁の非公開仕様の内部データ。判断は必ず公式ページの表示で行うこと。"
     return result
 
@@ -537,7 +548,7 @@ out center tags;
         return {"error": str(e)}
     ps = [p for p in (jp_geo.osm_place(e, lat, lon, "警察施設") for e in els) if p]
     # 警察署を交番・駐在所より優先
-    ps.sort(key=lambda p: ("警察署" not in p["name"], p["distance_km"]))
+    ps.sort(key=lambda p: (not p["name"].endswith("警察署"), p["distance_km"]))
     return {
         "stations": ps[:3],
         "note": "山岳遭難は 110番（警察）または 119番（消防）。登山届は地元警察署・コンパスで提出。",
@@ -810,13 +821,32 @@ def cli(
         jma_forecast = _gap("気象庁 府県天気予報", fetch_jma_forecast(office, jma_area.get("class10_code")))
         jma_warnings = _gap(
             "気象庁 警報・注意報",
-            fetch_jma_warnings(office, jma_area.get("class20_code"), jma_area.get("class10_code")),
+            fetch_jma_warnings(
+                office,
+                jma_area.get("class20_code"),
+                jma_area.get("class10_code"),
+                jma_area.get("class20_alternatives"),
+            ),
         )
     else:
         jma_forecast = _gap("気象庁 府県天気予報", {"error": "府県予報区を特定できませんでした"})
         jma_warnings = _gap("気象庁 警報・注意報", {"error": "府県予報区を特定できませんでした"})
 
     base = th or (lat, lon)
+    # 互いに独立な取得（主に Overpass）は並列に走らせる。結果の順序は下の dict で固定。
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = {
+            "air_quality": pool.submit(fetch_air_quality, lat, lon),
+            "daylight": pool.submit(fetch_daylight, lat, lon, date_str),
+            "volcano": pool.submit(fetch_volcanoes, lat, lon),
+            "protected_areas": pool.submit(fetch_protected_areas, lat, lon),
+            "nearest_hospital": pool.submit(fetch_hospitals, *base),
+            "police": pool.submit(fetch_police, *base),
+            "huts": pool.submit(fetch_huts, lat, lon),
+            "campgrounds": pool.submit(fetch_campgrounds, *base),
+        }
+        res = {k: f.result() for k, f in futures.items()}
+
     output: dict[str, Any] = {
         "peak": {
             "name": peak_name,
@@ -829,15 +859,15 @@ def cli(
         "weather": weather,
         "jma_forecast": jma_forecast,
         "jma_warnings": jma_warnings,
-        "air_quality": _gap("Open-Meteo 大気質", fetch_air_quality(lat, lon)),
-        "daylight": _gap("日の出・日の入り計算", fetch_daylight(lat, lon, date_str)),
-        "volcano": _gap("近接火山（OSM）", fetch_volcanoes(lat, lon)),
+        "air_quality": _gap("Open-Meteo 大気質", res["air_quality"]),
+        "daylight": _gap("日の出・日の入り計算", res["daylight"]),
+        "volcano": _gap("近接火山（OSM）", res["volcano"]),
         "municipalities": municipalities,
-        "protected_areas": _gap("国立公園等（OSM）", fetch_protected_areas(lat, lon)),
-        "nearest_hospital": _gap("病院（OSM）", fetch_hospitals(*base)),
-        "police": _gap("警察（OSM）", fetch_police(*base)),
-        "huts": _gap("山小屋（OSM）", fetch_huts(lat, lon)),
-        "campgrounds": _gap("キャンプ場（OSM）", fetch_campgrounds(*base)),
+        "protected_areas": _gap("国立公園等（OSM）", res["protected_areas"]),
+        "nearest_hospital": _gap("病院（OSM）", res["nearest_hospital"]),
+        "police": _gap("警察（OSM）", res["police"]),
+        "huts": _gap("山小屋（OSM）", res["huts"]),
+        "campgrounds": _gap("キャンプ場（OSM）", res["campgrounds"]),
         "gaps": gaps,
     }
 

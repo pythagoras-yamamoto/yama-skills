@@ -177,3 +177,37 @@ def test_cli_end_to_end():
     assert out["daylight"]["sunrise"].startswith("05:") or out["daylight"]["sunrise"].startswith("06:")
     assert out["nearest_hospital"]["hospitals"][0]["address"] == "長野県 松本市"
     assert "itinerary" in out and "time_estimates" in out
+
+
+def test_overpass_falls_back_to_mirror(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "overpass-api.de":
+            return httpx.Response(502)
+        return httpx.Response(200, json={"elements": [{"type": "node", "id": 9}]})
+
+    monkeypatch.setattr(jp_geo, "client", lambda timeout=30.0: httpx.Client(transport=httpx.MockTransport(handler)))
+    assert jp_geo.overpass("q") == [{"type": "node", "id": 9}]
+
+
+def test_overpass_all_mirrors_fail(monkeypatch):
+    monkeypatch.setattr(
+        jp_geo, "client",
+        lambda timeout=30.0: httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(504))),
+    )
+    with pytest.raises(RuntimeError, match="すべてのサーバー"):
+        jp_geo.overpass("q")
+
+
+def test_split_municipality_returns_all_warning_areas(monkeypatch):
+    area = json.loads(json.dumps(AREA))
+    area["class20s"] = {
+        "2020201": {"name": "松本市松本", "parent": "200021"},
+        "2020202": {"name": "松本市乗鞍上高地", "parent": "200021"},
+    }
+    monkeypatch.setitem(jp_geo._area_cache, "area", area)
+    a = jp_geo.resolve_jma_area("20202")
+    assert [x["name"] for x in a["class20_alternatives"]] == ["松本市松本", "松本市乗鞍上高地"]
+    data = [{"dataTypeCode": "VPWW61", "reportDatetime": "2026-10-17T05:00:00+09:00",
+             "warning": {"class20Items": [{"areaCode": "2020202", "kinds": [{"code": "14", "status": "発表"}]}]}}]
+    other = [{"code": "2020202", "name": "松本市乗鞍上高地"}]
+    assert [w["name"] for w in fc.parse_warnings(data, other[0]["code"])] == ["雷注意報"]

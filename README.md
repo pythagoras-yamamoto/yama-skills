@@ -52,10 +52,10 @@ graph TB
 
 ### プラグインとして
 
-このフォルダを GitHub のリポジトリに置いた場合:
+Claude Code で次を実行します（Python の依存は初回のツール実行時に uv が自動で入れます）:
 
 ```
-/plugin marketplace add {あなたのGitHubユーザー名}/{リポジトリ名}
+/plugin marketplace add pythagoras-yamamoto/yama-skills
 /plugin install yama@yama-marketplace
 /reload-plugins
 ```
